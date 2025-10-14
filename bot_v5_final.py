@@ -255,6 +255,28 @@ def backup_now():
         return True
     return False
 
+BACKUP_CHANNEL_ID = 1427608696547967026  
+
+@bot.command(name="백업")
+async def cmd_backup(ctx):
+    if not is_admin(ctx.author):
+        return await ctx.reply("관리자만 가능해요.")
+    ok = backup_now()
+    if ok:
+        await ctx.reply("✅ 백업 완료! 백업 파일을 채널에 업로드 중이에요...")
+        try:
+            ch = bot.get_channel(BACKUP_CHANNEL_ID)
+            if ch:
+                await ch.send(
+                    f"📦 [{datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M')}] 자동 백업 파일입니다.",
+                    file=discord.File(BACKUP_FILE)
+                )
+        except Exception as e:
+            await ctx.reply(f"⚠️ 업로드 중 오류 발생: {e}")
+    else:
+        await ctx.reply("⚠️ 백업 실패")
+
+
 async def schedule_daily_backup_loop():
     while True:
         now = datetime.datetime.now(KST)
@@ -351,4 +373,5 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
 
