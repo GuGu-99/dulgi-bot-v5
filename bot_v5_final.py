@@ -246,7 +246,12 @@ async def report(ctx):
     await ctx.author.send(msg)
 
 # ========= 백업/복원 =========
+
+# 자동 백업용 경로
+BACKUP_CHANNEL_ID = 1423359791287242782  # ⚠️ 실제 백업 채널 ID로 교체하세요
+
 def backup_now():
+    """현재 data.json을 data_backup.json으로 복사"""
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = f.read()
@@ -255,12 +260,13 @@ def backup_now():
         return True
     return False
 
-BACKUP_CHANNEL_ID = 1427608696547967026  
 
 @bot.command(name="백업")
 async def cmd_backup(ctx):
+    """관리자가 !백업 입력 시 자동으로 파일 생성 + 채널 업로드"""
     if not is_admin(ctx.author):
         return await ctx.reply("관리자만 가능해요.")
+
     ok = backup_now()
     if ok:
         await ctx.reply("✅ 백업 완료! 백업 파일을 채널에 업로드 중이에요...")
@@ -278,48 +284,57 @@ async def cmd_backup(ctx):
 
 
 async def schedule_daily_backup_loop():
+    """매일 오전 6시에 자동 백업"""
     while True:
         now = datetime.datetime.now(KST)
         next_backup = now.replace(hour=6, minute=0, second=0, microsecond=0)
         if next_backup < now:
             next_backup += datetime.timedelta(days=1)
         await asyncio.sleep((next_backup - now).total_seconds())
-        backup_now()
-        print("✅ Daily backup at 06:00 KST")
+        if backup_now():
+            print("✅ Daily backup completed at 06:00 KST")
+            try:
+                ch = bot.get_channel(BACKUP_CHANNEL_ID)
+                if ch:
+                    await ch.send(
+                        f"☀️ [{datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M')}] 오전 6시 자동 백업 완료!",
+                        file=discord.File(BACKUP_FILE)
+                    )
+            except Exception as e:
+                print("⚠️ 자동 백업 업로드 실패:", e)
 
-def is_admin(m): return getattr(m.guild_permissions, "manage_guild", False)
-
-@bot.command(name="백업")
-async def cmd_backup(ctx):
-    if not is_admin(ctx.author):
-        return await ctx.reply("관리자만 가능해요.")
-    ok = backup_now()
-    await ctx.reply("✅ 백업 완료!" if ok else "⚠️ 백업 실패")
 
 @bot.command(name="PP복원")
 async def cmd_restore_from_link(ctx, file_url: str = None):
+    """Discord 업로드된 JSON 링크를 받아 복원"""
     if not is_admin(ctx.author):
         return await ctx.reply("관리자만 가능해요.")
     if not file_url:
         return await ctx.reply("사용법: `!PP복원 [백업파일 링크]`")
+
     if not (file_url.startswith("https://cdn.discordapp.com/") or file_url.startswith("https://media.discordapp.net/")):
         return await ctx.reply("⚠️ Discord 업로드 링크만 허용돼요!")
+
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(file_url) as r:
                 if r.status != 200:
                     return await ctx.reply("⚠️ 파일 불러오기 실패")
                 text = await r.text()
+
         data_json = json.loads(text)
         if "users" not in data_json:
             return await ctx.reply("⚠️ 잘못된 JSON 구조")
+
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data_json, f, ensure_ascii=False, indent=4)
+
         global data_store
         data_store = data_json
-        await ctx.reply("✅ 복원 완료! data.json 갱신됨")
+        await ctx.reply("✅ 복원 완료! 기존 데이터 갱신됨")
     except Exception as e:
         await ctx.reply(f"⚠️ 복원 중 오류: {e}")
+
 
 # ========= 관리자 보고서 =========
 def all_users_week_total(data, ref_date):
@@ -373,5 +388,6 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
 
 
