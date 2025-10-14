@@ -117,7 +117,7 @@ def add_activity_logic(data, uid, date_str, channel_id, channel_points_map):
 # ========= 시각화 =========
 def get_week_progress(data, uid, ref_date, daily_goal=10):
     start, _ = get_week_range(ref_date)
-    labels = ["월ㅣ", "화ㅣ", "수ㅣ", "목ㅣ", "금ㅣ", "토ㅣ", "일"]
+    labels = ["월 ", "화 ", "수 ", "목 ", "금 ", "토 ", "일"]
     blocks = []
     cur = start
     for _ in range(7):
@@ -410,6 +410,7 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
 
 
 
