@@ -138,6 +138,11 @@ def home(): return "Bot is alive!"
 def run_flask(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
 def keep_alive(): Thread(target=run_flask, daemon=True).start()
 
+# ========= 관리자 판별 =========
+def is_admin(member):
+    """서버 관리자 권한 여부 확인"""
+    return getattr(member.guild_permissions, "manage_guild", False)
+
 # ========= 이벤트 =========
 @bot.event
 async def on_ready():
@@ -388,6 +393,7 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
 
 
 
