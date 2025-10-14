@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: dulgi-bot-v5
+    env: python
+    plan: starter
+    region: singapore  # 🇸🇬 or choose 'oregon' for global latency balance
+    buildCommand: |
+      pip install -r requirements.txt
+    startCommand: |
+      python bot_v5_4_1_final.py
+    disk:
+      name: bot-data
+      mountPath: /opt/render/project/data
+      sizeGB: 1
+    envVars:
+      - key: DISCORD_BOT_TOKEN
+        sync: false
