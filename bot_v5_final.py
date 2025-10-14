@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-# 둘기봇 v5.2 — 통합 완전판 (JSON 저장 / DM 보고서 / 잔디 타일 / 6시 기준 / 수동·자동 백업 / 관리자 리포트)
-# - !출근, !보고서 → DM 전송
-# - 잔디 타일(주간 + 5x4 월간) 텍스트 복귀
-# - 오전 6시(KST) 자동 백업 + !백업 시 수동 백업 파일을 백업 채널 업로드
-# - 관리자 리포트 : !PP보고서 주간 / !PP보고서 월간 YY.MM (상위20 + CSV)
-# - 점수 적립: 채널별 포인트 + 일일 채널 최대치 + (옵션) 글로벌 일일 상한
-# - ‘다-그렸어요’ 특수규칙: 이미지 또는 링크 포함 시 점수 인정
-# - 주간 50점 단위 달성 시 DM 축하(격려문구 랜덤은 제거 요청대로 미포함)
+# 둘기봇 v5.3 — 전 기능 복구 통합본 (JSON 저장 / DM 보고서 / 잔디 타일 / 6시 기준 / 자동·수동 백업 / 관리자 리포트 / 메시지 점수)
+# - 메시지 감지 점수(이미지/링크 규칙, 채널별 일일 상한, 글로벌 상한)
+# - !출근 → 출근기록 + ‘출퇴근기록’(4점) 자동 반영
+# - !보고서 → DM + 주간/월간(5x4, 여백) 잔디
+# - 06시 기준 하루 전환 및 06시 자동 백업(백업채널 업로드) + !백업 수동
+# - 관리자 리포트: !PP보고서 주간 / !PP보고서 월간 YY.MM (상위20 + CSV)
+# - 주간 50점 단위 달성 시 DM 안내
+# - Flask keep-alive(Render용)
 
-import os, io, csv, json, random, asyncio, datetime, pytz
+import os, io, csv, json, asyncio, datetime, pytz
 from typing import Dict, Tuple, List
 from flask import Flask
 from threading import Thread
@@ -18,29 +18,27 @@ from discord.ext import commands
 
 # ========= 기본 설정 =========
 KST = pytz.timezone("Asia/Seoul")
-LOGICAL_DAY_START_HOUR = 6  # 하루 시작: 오전 6시
+LOGICAL_DAY_START_HOUR = 6  # 하루 시작 (06:00)
 DATA_FILE = "data.json"
 BACKUP_FILE = "data_backup.json"
 
-# Render 환경변수 (선택: 백업 채널, 글로벌 일일 상한)
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0"))
-GLOBAL_DAILY_CAP_ENV = os.environ.get("GLOBAL_DAILY_CAP")
+GLOBAL_DAILY_CAP_ENV = os.environ.get("GLOBAL_DAILY_CAP")  # 선택: 숫자
 
-# 채널 점수체계 (name, points, daily_max, image_only)
 CHANNEL_POINTS = {
     1423170386811682908: {"name": "일일-그림보고", "points": 6, "daily_max": 6, "image_only": True},
     1423172691724079145: {"name": "자유채팅판", "points": 1, "daily_max": 4, "image_only": False},
     1423359059566006272: {"name": "정보-공모전", "points": 1, "daily_max": 1, "image_only": False},
     1423170949477568623: {"name": "정보-그림꿀팁", "points": 1, "daily_max": 1, "image_only": False},
     1423242322665148531: {"name": "고민상담", "points": 1, "daily_max": 1, "image_only": False},
-    1423359791287242782: {"name": "출퇴근기록", "points": 4, "daily_max": 4, "image_only": False},
-    1423171509752434790: {"name": "다-그렸어요", "points": 5, "daily_max": 5, "image_only": True},  # 특수: 이미지 or 링크
+    1423359791287242782: {"name": "출퇴근기록", "points": 4, "daily_max": 4, "image_only": False},  # 출근용
+    1423171509752434790: {"name": "다-그렸어요", "points": 5, "daily_max": 5, "image_only": True},  # 특수: 이미지 OR 링크
 }
 
 WEEKLY_BEST_THRESHOLD = 60
-MONTHLY_BEST_THRESHOLD = 200
+MONTHLY_BEST_THRESHOLD = 200  # (참고 상수, 리포트엔 누적값 사용)
 
-# ========= 시간 유틸 (06:00 기준 날짜) =========
+# ========= 시간 유틸 =========
 def now_kst() -> datetime.datetime:
     return datetime.datetime.now(KST)
 
@@ -52,7 +50,6 @@ def logical_date_from_dt(dt: datetime.datetime) -> datetime.date:
 def logical_date_str_from_now() -> str:
     return logical_date_from_dt(now_kst()).strftime("%Y-%m-%d")
 
-# ========= 주/월 계산 =========
 def get_week_range_from_date_obj(d: datetime.date) -> Tuple[datetime.date, datetime.date]:
     start = d - datetime.timedelta(days=d.weekday())
     end = start + datetime.timedelta(days=6)
@@ -66,10 +63,8 @@ def week_key(d: datetime.date) -> str:
 def load_data(path: str = DATA_FILE) -> dict:
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
-            try:
-                return json.load(f)
-            except Exception:
-                return {}
+            try: return json.load(f)
+            except Exception: return {}
     return {}
 
 def save_data(data: dict, path: str = DATA_FILE):
@@ -83,9 +78,9 @@ def ensure_user(data: dict, uid: str):
         data["users"] = {}
     if uid not in data["users"]:
         data["users"][uid] = {
-            "attendance": [],
-            "activity": {},    # date_str -> {"total": int, "by_channel": {cid: pts}}
-            "notified": {}     # week_key -> [50,100,...]
+            "attendance": [],           # [date_str]
+            "activity": {},             # date_str -> {"total": int, "by_channel": {cid: pts}}
+            "notified": {}              # week_key -> [50,100,...]
         }
 
 # ========= 통계 로직 =========
@@ -137,7 +132,7 @@ def add_activity_logic(
     channel_points_map: Dict,
     global_daily_cap: int = None
 ) -> Tuple[bool, List[int]]:
-    """점수 추가 & 50점 단위 축하 알림(이번 주)"""
+    """점수 추가 & 50점 단위 축하 알림 계산(해당 주간 기준)"""
     ensure_user(data, uid)
     conf = channel_points_map.get(channel_id)
     if not conf:
@@ -220,7 +215,7 @@ def get_month_grid_5x4(data: Dict, uid: str, ref_date: datetime.date, daily_goal
     next_month = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
     month_days = (next_month - datetime.timedelta(days=1)).day
     cells = []
-    for day in range(1, 21):  # 1~20일만
+    for day in range(1, 21):  # 1~20일
         if day > month_days:
             cells.append("  ")
             continue
@@ -229,8 +224,10 @@ def get_month_grid_5x4(data: Dict, uid: str, ref_date: datetime.date, daily_goal
         cells.append("🟩" if pts >= daily_goal else "⬜")
     rows = []
     for r in range(4):
-        rows.append(" ".join(cells[r*5:(r+1)*5]))
-    return "월간 활동 (1~20일 기준, 초록=달성)\n" + "\n".join(rows)
+        row = " ".join(cells[r*5:(r+1)*5])   # 열 사이 공백
+        rows.append(row)
+    spaced_rows = "\n\n".join(rows)         # 행 사이 여백
+    return "월간 활동 (1~20일 기준, 초록=달성)\n" + spaced_rows
 
 # ========= 백업 =========
 def backup_now() -> bool:
@@ -243,7 +240,7 @@ def backup_now() -> bool:
     return False
 
 async def schedule_daily_backup_loop():
-    # 매일 06:00 KST에 자동 백업 + 백업 채널 업로드
+    # 매일 06:00 KST 자동 백업 + 백업 채널 업로드
     while True:
         now = now_kst()
         target = now.replace(hour=6, minute=0, second=0, microsecond=0)
@@ -268,7 +265,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 data_store = load_data()
 
 # Flask keep-alive (Render)
@@ -284,7 +280,6 @@ def keep_alive():
     t = Thread(target=run_flask, daemon=True)
     t.start()
 
-# ========= 권한 체크 =========
 def is_admin(member: discord.Member) -> bool:
     try:
         return member.guild_permissions.manage_guild
@@ -297,24 +292,6 @@ async def on_ready():
     print(f"✅ 로그인 완료: {bot.user}")
     keep_alive()
     bot.backup_task = asyncio.create_task(schedule_daily_backup_loop())
-
-@bot.command(name="출근")
-async def check_in(ctx):
-    uid = str(ctx.author.id)
-    today_str = logical_date_str_from_now()
-    ensure_user(data_store, uid)
-    if today_str in data_store["users"][uid]["attendance"]:
-        try:
-            await ctx.author.send("이미 출근을 완료했습니다 🕐")
-        except:
-            await ctx.reply("이미 출근을 완료했습니다 🕐")
-        return
-    data_store["users"][uid]["attendance"].append(today_str)
-    save_data(data_store)
-    try:
-        await ctx.author.send("✅ 출근 완료! 오늘도 힘내요!")
-    except:
-        await ctx.reply("✅ 출근 완료! 오늘도 힘내요!")
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -330,7 +307,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # 특수규칙: ‘다-그렸어요’(cid=1423171509752434790)는 이미지 또는 링크 포함 시 인정
+    # 특수규칙: ‘다-그렸어요’(1423171509752434790) → 이미지 or 링크 포함시 인정
     special_channel = 1423171509752434790
     countable = True
     if cid == special_channel:
@@ -347,7 +324,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # 글로벌 일일 상한 (환경변수 또는 data_store["config"]["global_daily_cap"])
+    # 글로벌 일일 상한
     global_cap = None
     try:
         if GLOBAL_DAILY_CAP_ENV:
@@ -359,22 +336,46 @@ async def on_message(message: discord.Message):
         global_cap = None
 
     today_str = logical_date_str_from_now()
+
     added, newly = add_activity_logic(
         data_store, uid, today_str, cid, CHANNEL_POINTS, global_daily_cap=global_cap
     )
     if added:
         save_data(data_store)
-        # 50점 단위 축하 DM
         if newly:
             try:
-                # 최신 주간 총점 계산
                 wtotal, _ = weekly_activity_points_logic(data_store, uid, logical_date_from_dt(now_kst()))
-                pick = f"🎉 이번주 {max(newly)}점 달성! (현재 주간 합계: {wtotal}점)"
-                await message.author.send(pick)
+                msg = f"🎉 이번주 {max(newly)}점 달성! (현재 주간 합계: {wtotal}점)"
+                await message.author.send(msg)
             except Exception:
                 pass
 
     await bot.process_commands(message)
+
+@bot.command(name="출근")
+async def check_in(ctx):
+    uid = str(ctx.author.id)
+    today_str = logical_date_str_from_now()
+    ensure_user(data_store, uid)
+
+    if today_str in data_store["users"][uid]["attendance"]:
+        try:
+            await ctx.author.send("이미 출근을 완료했습니다 🕐")
+        except:
+            await ctx.reply("이미 출근을 완료했습니다 🕐")
+        return
+
+    # 출근 기록
+    data_store["users"][uid]["attendance"].append(today_str)
+    # 출근 점수(출퇴근기록 4점) 자동 반영
+    commute_channel_id = 1423359791287242782
+    add_activity_logic(data_store, uid, today_str, commute_channel_id, CHANNEL_POINTS)
+
+    save_data(data_store)
+    try:
+        await ctx.author.send("✅ 출근 완료! 오늘도 힘내요! (+4점)")
+    except:
+        await ctx.reply("✅ 출근 완료! 오늘도 힘내요! (+4점)")
 
 @bot.command(name="보고서")
 async def report_personal(ctx):
@@ -385,18 +386,13 @@ async def report_personal(ctx):
     att = weekly_attendance_count_logic(data_store, uid, today)
     pts, breakdown = weekly_activity_points_logic(data_store, uid, today)
 
-    # 채널명으로 변환
     bd_lines = []
     for cid, v in breakdown.items():
         try:
             cid_int = int(cid)
         except Exception:
             cid_int = None
-        nm = None
-        if cid_int and cid_int in CHANNEL_POINTS:
-            nm = CHANNEL_POINTS[cid_int]["name"]
-        else:
-            nm = str(cid)
+        nm = CHANNEL_POINTS.get(cid_int, {}).get("name", str(cid))
         bd_lines.append(f"{nm}: {v}")
     bd_read = ", ".join(bd_lines) if bd_lines else "없음"
 
@@ -407,13 +403,8 @@ async def report_personal(ctx):
         f"🕐 출근 횟수: {att}회\n"
         f"💬 활동 점수: {pts}점\n"
         f"📂 활동 채널별: {bd_read}\n\n"
+        f"{'✨ 우수사원까지 '+str(remain)+'점 남았어요! 💪' if remain>0 else '🎉 이번 주 우수사원 기준 달성! 멋져요 💖'}\n"
     )
-    if remain > 0:
-        msg += f"✨ 우수사원까지 {remain}점 남았어요! 💪\n"
-    else:
-        msg += "🎉 축하드려요! 이번 주 우수사원 기준을 달성했어요! 멋져요 💖\n"
-
-    # 잔디 타일 (주간 + 월간 5x4)
     msg += "\n📊 이번주 활동 현황:\n" + get_week_progress(data_store, uid, today, daily_goal=10) + "\n"
     msg += "\n" + get_month_grid_5x4(data_store, uid, today, daily_goal=10) + "\n"
 
@@ -422,14 +413,12 @@ async def report_personal(ctx):
     except:
         await ctx.reply("DM을 보낼 수 없습니다! DM 허용을 켜주세요 🕊️")
 
-# ====== 관리자: 수동 백업 ======
 @bot.command(name="백업")
 async def cmd_backup(ctx):
     if not is_admin(ctx.author):
         return await ctx.reply("이 명령어는 관리자만 사용할 수 있어요.")
     ok = backup_now()
     if ok:
-        # 현재 data.json 스냅샷을 백업 채널로 업로드
         try:
             buf = io.BytesIO(json.dumps(load_data(), ensure_ascii=False, indent=2).encode())
             name = f"manual_backup_{now_kst().strftime('%Y%m%d_%H%M')}.json"
@@ -443,7 +432,7 @@ async def cmd_backup(ctx):
     else:
         await ctx.reply("⚠️ 백업할 데이터가 없어요.")
 
-# ====== 관리자 리포트: 주간/월간 ======
+# ====== 관리자 리포트 ======
 def all_users_week_total(data: Dict, ref_date: datetime.date) -> List[Tuple[str, int]]:
     ret = []
     for uid in data.get("users", {}):
@@ -471,9 +460,9 @@ async def cmd_pp_report(ctx, 기간: str = None, *args):
     if 기간 == "주간":
         today = logical_date_from_dt(now_kst())
         start, end = get_week_range_from_date_obj(today)
-        pairs = all_users_week_total(data_store, today)  # [(uid, total), ...] desc
+        pairs = all_users_week_total(data_store, today)  # [(uid, total)] desc
 
-        # CSV (유저명+ID+점수)
+        # CSV
         csv_buf = io.StringIO()
         writer = csv.writer(csv_buf)
         writer.writerow(["순위", "사용자명", "사용자ID", "주간점수"])
@@ -500,20 +489,17 @@ async def cmd_pp_report(ctx, 기간: str = None, *args):
 
         return await ctx.reply(f"{header}\n{body}\n{footer}", file=discord.File(fp=csv_bytes, filename=filename))
 
-    # ====== 월간 ======
     if 기간 == "월간":
         today = logical_date_from_dt(now_kst())
 
-        # YY.MM 또는 YYYY.MM 또는 "10월" 모두 허용
+        # YY.MM / YYYY.MM / "10월" 모두 허용
         target_year, target_month = today.year, today.month
         if args and len(args) >= 1:
             raw = args[0].strip()
             try:
                 if "월" in raw:
-                    # "10월" 형태
                     target_month = int(raw.replace("월", ""))
                 elif "." in raw:
-                    # YY.MM 또는 YYYY.MM
                     y_s, m_s = raw.split(".")
                     if len(y_s) == 2:
                         target_year = int("20" + y_s)
