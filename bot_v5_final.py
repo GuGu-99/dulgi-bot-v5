@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
-# 둘기봇 v5.4_final_Stable — Render Starter 대응 완전판
-# ✅ 주요 기능:
-# - 출근 시 DM 자동 +4점 반영
-# - 이미지/링크 점수 자동 인식
-# - !보고서 : 주간 점수 + 잔디 시각화 (DM 발송)
-# - !PP보고서 주간 / 월간 N월 : 관리자 전용 CSV
-# - !PP복원 [링크] : Discord 백업파일 복구
-# - 자동 백업 (매일 오전 6시)
-# - Flask keep-alive (Render 호환)
-# - 주간/월간 우수사원 달성 시 DM 축하 알림
-# - Render Starter용 안전 백업 로그 강화
+# 둘기봇 v5.4.1 — Render Starter 플랜 (Persistent Disk Edition)
+# ✅ Disk 기반 영구 저장 / 데이터 마이그레이션 자동 지원
 
-import os, io, csv, json, random, asyncio, datetime, pytz, aiohttp
+import os
+import io
+import csv
+import json
+import random
+import asyncio
+import datetime
+import pytz
+import aiohttp
 from typing import Dict
 from flask import Flask
 from threading import Thread
@@ -20,8 +19,22 @@ from discord.ext import commands
 
 # ========= 기본 설정 =========
 KST = pytz.timezone("Asia/Seoul")
-DATA_FILE = "data.json"
-BACKUP_FILE = "data_backup.json"
+
+# Persistent Disk 경로 (자동 영구 저장)
+BASE_PATH = "/opt/render/project/data"
+os.makedirs(BASE_PATH, exist_ok=True)
+
+DATA_FILE = os.path.join(BASE_PATH, "data.json")
+BACKUP_FILE = os.path.join(BASE_PATH, "data_backup.json")
+
+# 이전 버전에서 src 폴더에 있던 파일이 있다면 자동 복사
+OLD_DATA_FILE = "/opt/render/project/src/data.json"
+if os.path.exists(OLD_DATA_FILE) and not os.path.exists(DATA_FILE):
+    try:
+        os.system(f"cp {OLD_DATA_FILE} {DATA_FILE}")
+        print("✅ 이전 data.json을 Disk로 자동 마이그레이션 완료.")
+    except Exception as e:
+        print("⚠️ 마이그레이션 실패:", e)
 
 CHANNEL_POINTS = {
     1423170386811682908: {"name": "일일-그림보고", "points": 6, "daily_max": 6, "image_only": True},
@@ -76,14 +89,17 @@ def add_activity_logic(data, uid, date_str, channel_id, channel_points_map):
     if not conf:
         return False
     points, ch_max = conf["points"], conf["daily_max"]
+
     user = data["users"][uid]
     if date_str not in user["activity"]:
         user["activity"][date_str] = {"total": 0, "by_channel": {}}
     today_rec = user["activity"][date_str]
     ckey = str(channel_id)
     prev = today_rec["by_channel"].get(ckey, 0)
+
     if prev + points > ch_max:
         return False
+
     today_rec["by_channel"][ckey] = prev + points
     today_rec["total"] += points
     return True
@@ -129,7 +145,7 @@ def home(): return "Bot is alive!"
 def run_flask(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
 def keep_alive(): Thread(target=run_flask, daemon=True).start()
 
-# ========= on_ready =========
+# ========= 이벤트 =========
 @bot.event
 async def on_ready():
     print(f"✅ 로그인 완료: {bot.user}")
@@ -142,22 +158,12 @@ async def check_in(ctx):
     uid = str(ctx.author.id)
     today = logical_date_str_from_now()
     ensure_user(data_store, uid)
-
     if today in data_store["users"][uid]["attendance"]:
-        try:
-            await ctx.author.send("이미 출근 완료 🕐")
-        except discord.Forbidden:
-            await ctx.reply("⚠️ DM을 보낼 수 없어요! 서버 멤버 DM 허용을 켜주세요.")
-        return
-
+        return await ctx.author.send("이미 출근 완료 🕐")
     data_store["users"][uid]["attendance"].append(today)
     add_activity_logic(data_store, uid, today, 1423359791287242782, CHANNEL_POINTS)
     save_data(data_store)
-
-    try:
-        await ctx.author.send("✅ 출근 완료! (+4점) 오늘도 힘내요!")
-    except discord.Forbidden:
-        await ctx.reply("⚠️ DM을 보낼 수 없어요! 서버 멤버 DM 허용을 켜주세요.")
+    await ctx.author.send("✅ 출근 완료! (+4점) 오늘도 힘내요!")
 
 # ========= 메시지 감지 =========
 @bot.event
@@ -170,52 +176,65 @@ async def on_message(msg):
     conf = CHANNEL_POINTS.get(cid)
     if not conf:
         await bot.process_commands(msg); return
-
     countable = True
     if cid == 1423171509752434790:
-        countable = ("http" in msg.content) or (len(msg.attachments) > 0)
+        has_link = "http" in msg.content
+        has_attach = len(msg.attachments) > 0
+        countable = has_link or has_attach
     elif conf["image_only"]:
         countable = any(a.content_type and a.content_type.startswith("image/") for a in msg.attachments)
     if not countable:
         await bot.process_commands(msg); return
-
     add_activity_logic(data_store, uid, today, cid, CHANNEL_POINTS)
     save_data(data_store)
     await check_milestones(msg.author, uid)
     await bot.process_commands(msg)
 
 # ========= 축하 알림 =========
-async def check_milestones(user, uid):
+async def check_milestones(user, uid: str):
     today = datetime.datetime.now(KST).date()
     ensure_user(data_store, uid)
+
     start, end = get_week_range(today)
-    weekly_total = sum(rec.get("total", 0)
+    weekly_total = sum(
+        rec.get("total", 0)
         for ds, rec in data_store["users"][uid]["activity"].items()
-        if start <= datetime.datetime.strptime(ds, "%Y-%m-%d").date() <= end)
+        if start <= datetime.datetime.strptime(ds, "%Y-%m-%d").date() <= end
+    )
+
     prefix = f"{today.year}-{today.month:02d}"
-    monthly_total = sum(rec.get("total", 0)
+    monthly_total = sum(
+        rec.get("total", 0)
         for ds, rec in data_store["users"][uid]["activity"].items()
-        if ds.startswith(prefix))
+        if ds.startswith(prefix)
+    )
+
     notified = data_store["users"][uid].setdefault("notified", {})
-    wkey, mkey = week_key(today), f"{today.year}-{today.month:02d}"
+    wkey = week_key(today)
+    mkey = f"{today.year}-{today.month:02d}"
 
     if weekly_total >= WEEKLY_BEST_THRESHOLD and not notified.get(f"weekly_{wkey}"):
-        msg = random.choice([
-            f"🌸 이번 주 {weekly_total}점 달성! 꾸준한 열정이 멋져요. 다음 주도 함께 성장해봐요 💪",
-            f"☕ 한 주 동안 쌓은 {weekly_total}점, 정말 대단해요! 다음 주도 화이팅 ☀️",
-        ])
-        try: await user.send(msg)
+        try:
+            msg = random.choice([
+                f"🌿 이번 주 {weekly_total}점 돌파! 꾸준한 열정이 멋져요. 다음 주도 함께 성장해봐요 💪",
+                f"🌸 한 주 동안 쌓아온 {weekly_total}점, 정말 대단해요! 다음 주도 파이팅이에요 ☀️",
+                f"☕ 이번 주 목표 달성! 노력들이 멋진 결과로 이어졌어요. 다음 주도 함께 달려봐요 🌈"
+            ])
+            await user.send(msg)
+            notified[f"weekly_{wkey}"] = True
         except: pass
-        notified[f"weekly_{wkey}"] = True
 
     if monthly_total >= MONTHLY_BEST_THRESHOLD and not notified.get(f"monthly_{mkey}"):
-        msg = random.choice([
-            f"🏆 {today.month}월 {monthly_total}점 달성! 한 달간의 꾸준한 노력, 정말 자랑스러워요. 다음 달에도 함께 나아가요 ✨",
-            f"💫 {today.month}월 {monthly_total}점 달성! 노력의 결실이 반짝이고 있어요. 다음 달에도 꾸준히 가요 🌿",
-        ])
-        try: await user.send(msg)
+        try:
+            msg = random.choice([
+                f"🏆 {today.month}월 {monthly_total}점 달성! 한 달간의 꾸준한 노력, 정말 자랑스러워요. 다음 달에도 함께 멋지게 나아가요 ✨",
+                f"🌟 {today.month}월 동안 쌓아온 {monthly_total}점, 그 열정이 대단해요. 다음 달에도 멋진 기록 만들어봐요 💪",
+                f"💫 {today.month}월 목표 달성! 노력의 결실이 반짝이고 있어요. 다음 달에도 천천히, 꾸준히 함께 가요 🌿"
+            ])
+            await user.send(msg)
+            notified[f"monthly_{mkey}"] = True
         except: pass
-        notified[f"monthly_{mkey}"] = True
+
     save_data(data_store)
 
 # ========= 보고서 =========
@@ -233,15 +252,13 @@ async def report(ctx):
            f"{get_month_grid_5x4(data_store, uid, today)}")
     await ctx.author.send(msg)
 
-# ========= 백업 =========
+# ========= 백업/복원 =========
 def backup_now():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = f.read()
         with open(BACKUP_FILE, "w", encoding="utf-8") as f:
             f.write(data)
-        size = os.path.getsize(DATA_FILE)
-        print(f"✅ Backup complete ({size} bytes) at {datetime.datetime.now(KST)}")
         return True
     return False
 
@@ -253,6 +270,7 @@ async def schedule_daily_backup_loop():
             next_backup += datetime.timedelta(days=1)
         await asyncio.sleep((next_backup - now).total_seconds())
         backup_now()
+        print("✅ Daily backup at 06:00 KST")
 
 def is_admin(m): return getattr(m.guild_permissions, "manage_guild", False)
 
@@ -263,14 +281,13 @@ async def cmd_backup(ctx):
     ok = backup_now()
     await ctx.reply("✅ 백업 완료!" if ok else "⚠️ 백업 실패")
 
-# ========= 복원 =========
 @bot.command(name="PP복원")
-async def cmd_restore(ctx, file_url: str = None):
+async def cmd_restore_from_link(ctx, file_url: str = None):
     if not is_admin(ctx.author):
         return await ctx.reply("관리자만 가능해요.")
     if not file_url:
         return await ctx.reply("사용법: `!PP복원 [백업파일 링크]`")
-    if not file_url.startswith("https://cdn.discordapp.com/"):
+    if not (file_url.startswith("https://cdn.discordapp.com/") or file_url.startswith("https://media.discordapp.net/")):
         return await ctx.reply("⚠️ Discord 업로드 링크만 허용돼요!")
     try:
         async with aiohttp.ClientSession() as s:
