@@ -20,21 +20,13 @@ from discord.ext import commands
 # ========= 기본 설정 =========
 KST = pytz.timezone("Asia/Seoul")
 
-# Persistent Disk 경로 (자동 영구 저장)
+# Persistent Disk 경로 (Render Starter 전용)
 BASE_PATH = "/opt/render/project/data"
 os.makedirs(BASE_PATH, exist_ok=True)
 
+# 데이터 파일 경로 (자동 영구 저장)
 DATA_FILE = os.path.join(BASE_PATH, "data.json")
 BACKUP_FILE = os.path.join(BASE_PATH, "data_backup.json")
-
-# 이전 버전에서 src 폴더에 있던 파일이 있다면 자동 복사
-OLD_DATA_FILE = "/opt/render/project/src/data.json"
-if os.path.exists(OLD_DATA_FILE) and not os.path.exists(DATA_FILE):
-    try:
-        os.system(f"cp {OLD_DATA_FILE} {DATA_FILE}")
-        print("✅ 이전 data.json을 Disk로 자동 마이그레이션 완료.")
-    except Exception as e:
-        print("⚠️ 마이그레이션 실패:", e)
 
 CHANNEL_POINTS = {
     1423170386811682908: {"name": "일일-그림보고", "points": 6, "daily_max": 6, "image_only": True},
@@ -48,6 +40,7 @@ CHANNEL_POINTS = {
 
 WEEKLY_BEST_THRESHOLD = 60
 MONTHLY_BEST_THRESHOLD = 200
+
 
 # ========= 데이터 유틸 =========
 def load_data(path=DATA_FILE):
@@ -358,3 +351,4 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
