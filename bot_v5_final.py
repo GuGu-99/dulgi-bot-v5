@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
-# 둘기봇 v6_final_full — Render PostgreSQL 완전통합판
-# - 모든 데이터 PostgreSQL DB에 저장 (영구 보존)
-# - data.json은 캐시/비상용
-# - Render Starter 이상에서 24시간 가동 가능
-# - 기존 기능 전부 포함 (보고서/백업/복원/우수사원 등)
+# 둘기봇 v6_final_full_DMfixed — Render PostgreSQL 완전통합 + DM 개선판
+# - 출근 및 보고서 DM 전송 수정
+# - PostgreSQL에 영구 저장 (Starter 플랜 완전 호환)
+# - 자동/수동 백업 및 복원 유지
 
-import os, io, csv, json, asyncio, datetime, random, aiohttp
-import pytz, discord, asyncpg
+import os, io, csv, json, asyncio, datetime, random, aiohttp, pytz, asyncpg, discord
 from discord.ext import commands
 from flask import Flask
 from threading import Thread
 
-# ========== 기본 설정 ==========
+# ========= 기본 설정 =========
 KST = pytz.timezone("Asia/Seoul")
 DATA_FILE = "data.json"
 BACKUP_FILE = "data_backup.json"
@@ -29,20 +27,20 @@ CHANNEL_POINTS = {
 WEEKLY_BEST_THRESHOLD = 60
 MONTHLY_BEST_THRESHOLD = 200
 
-# ========== Discord 설정 ==========
+# ========= Discord 설정 =========
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ========== Flask keep-alive ==========
+# ========= Flask keep-alive =========
 app = Flask(__name__)
 @app.route("/")
 def home(): return "Bot is alive!"
 def run_flask(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
 def keep_alive(): Thread(target=run_flask, daemon=True).start()
 
-# ========== PostgreSQL 연결 ==========
+# ========= PostgreSQL 연결 =========
 async def init_db():
     global pool
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL"])
@@ -67,7 +65,7 @@ async def save_user(uid, data):
         ON CONFLICT (id) DO UPDATE SET data=$2;
         """, uid, json.dumps(data))
 
-# ========== 날짜 관련 ==========
+# ========= 날짜/주간 계산 =========
 def logical_date_str():
     now = datetime.datetime.now(KST)
     logical = now - datetime.timedelta(hours=6)
@@ -82,7 +80,7 @@ def week_key(d):
     y, w, _ = d.isocalendar()
     return f"{y}-W{w:02d}"
 
-# ========== 점수 반영 ==========
+# ========= 점수 반영 =========
 async def add_points(uid, channel_id, conf):
     user = await load_user(uid)
     date_str = logical_date_str()
@@ -95,7 +93,7 @@ async def add_points(uid, channel_id, conf):
     await save_user(uid, user)
     return True
 
-# ========== 시각화 ==========
+# ========= 시각화 =========
 def get_week_progress(data, uid, ref_date, daily_goal=10):
     start, _ = get_week_range(ref_date)
     labels = ["월", "화", "수", "목", "금", "토", "일"]
@@ -122,25 +120,21 @@ def get_month_grid_5x4(data, uid, ref_date, daily_goal=10):
     rows = [" ".join(cells[r*5:(r+1)*5]) for r in range(4)]
     return "월간 활동 (1~20일 기준)\n" + "\n".join(rows)
 
-# ========== 축하 DM ==========
+# ========= 축하 DM =========
 async def check_milestones(user, uid):
     data = await load_user(uid)
     today = datetime.datetime.now(KST).date()
     start, end = get_week_range(today)
-    weekly_total = sum(
-        rec.get("total", 0)
+    weekly_total = sum(rec.get("total", 0)
         for ds, rec in data["activity"].items()
-        if start <= datetime.datetime.strptime(ds, "%Y-%m-%d").date() <= end
-    )
+        if start <= datetime.datetime.strptime(ds, "%Y-%m-%d").date() <= end)
     prefix = f"{today.year}-{today.month:02d}"
-    monthly_total = sum(
-        rec.get("total", 0)
-        for ds, rec in data["activity"].items()
-        if ds.startswith(prefix)
-    )
+    monthly_total = sum(rec.get("total", 0)
+        for ds, rec in data["activity"].items() if ds.startswith(prefix))
     notified = data.setdefault("notified", {})
-    wkey = week_key(today)
-    mkey = f"{today.year}-{today.month:02d}"
+    wkey, mkey = week_key(today), f"{today.year}-{today.month:02d}"
+
+    # 주간 우수사원
     if weekly_total >= WEEKLY_BEST_THRESHOLD and not notified.get(f"weekly_{wkey}"):
         msg = random.choice([
             f"🌿 이번 주 {weekly_total}점 돌파! 당신의 꾸준한 열정이 정말 멋져요. 다음 주도 함께 성장해봐요 💪",
@@ -149,6 +143,8 @@ async def check_milestones(user, uid):
         ])
         await user.send(msg)
         notified[f"weekly_{wkey}"] = True
+
+    # 월간 우수사원
     if monthly_total >= MONTHLY_BEST_THRESHOLD and not notified.get(f"monthly_{mkey}"):
         msg = random.choice([
             f"🏆 {today.month}월 {monthly_total}점 달성! 한 달간의 꾸준한 노력, 정말 자랑스러워요. 다음 달에도 함께 멋지게 나아가요 ✨",
@@ -157,9 +153,10 @@ async def check_milestones(user, uid):
         ])
         await user.send(msg)
         notified[f"monthly_{mkey}"] = True
+
     await save_user(uid, data)
 
-# ========== 봇 이벤트 ==========
+# ========= 봇 이벤트 =========
 @bot.event
 async def on_ready():
     print(f"✅ 로그인 완료: {bot.user}")
@@ -167,7 +164,7 @@ async def on_ready():
     await init_db()
     bot.loop.create_task(schedule_backup_loop())
 
-# ========== 메시지 감지 ==========
+# ========= 메시지 감지 =========
 @bot.event
 async def on_message(msg):
     if msg.author.bot: return
@@ -185,20 +182,20 @@ async def on_message(msg):
         await check_milestones(msg.author, uid)
     await bot.process_commands(msg)
 
-# ========== 출근 ==========
+# ========= 출근 (DM) =========
 @bot.command(name="출근")
 async def cmd_checkin(ctx):
     uid = str(ctx.author.id)
     user = await load_user(uid)
     today = logical_date_str()
     if today in user["attendance"]:
-        return await ctx.reply("이미 출근 완료 🕐")
+        return await ctx.author.send("이미 출근 완료 🕐")
     user["attendance"].append(today)
     await save_user(uid, user)
     await add_points(uid, 1423359791287242782, CHANNEL_POINTS[1423359791287242782])
-    await ctx.reply("✅ 출근 완료! (+4점) 오늘도 힘내요!")
+    await ctx.author.send("✅ 출근 완료! (+4점) 오늘도 힘내요!")
 
-# ========== 보고서 ==========
+# ========= 보고서 (DM) =========
 @bot.command(name="보고서")
 async def cmd_report(ctx):
     uid = str(ctx.author.id)
@@ -211,34 +208,33 @@ async def cmd_report(ctx):
            f"{get_month_grid_5x4(data, uid, today)}")
     await ctx.author.send(msg)
 
-# ========== 백업 ==========
-def local_backup():
-    async def _():
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM users")
-            data = {r["id"]: r["data"] for r in rows}
-            with open(BACKUP_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-    return asyncio.create_task(_())
-
+# ========= 백업 / 자동 백업 =========
 async def schedule_backup_loop():
     while True:
         now = datetime.datetime.now(KST)
         next6 = now.replace(hour=6, minute=0, second=0, microsecond=0)
         if next6 < now: next6 += datetime.timedelta(days=1)
         await asyncio.sleep((next6 - now).total_seconds())
-        await local_backup()
+        await backup_now()
         print("✅ Daily backup at 06:00 KST")
+
+async def backup_now():
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM users")
+        data = {r["id"]: r["data"] for r in rows}
+        with open(BACKUP_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
 
 @bot.command(name="백업")
 async def cmd_backup(ctx):
-    await local_backup()
+    await backup_now()
     await ctx.reply("✅ 데이터베이스 백업 완료!")
 
-# ========== 복원 ==========
+# ========= 복원 =========
 @bot.command(name="PP복원")
 async def cmd_restore(ctx, link=None):
-    if not link: return await ctx.reply("⚠️ 사용법: !PP복원 [JSON 링크]")
+    if not link:
+        return await ctx.reply("⚠️ 사용법: !PP복원 [JSON 링크]")
     async with aiohttp.ClientSession() as s:
         async with s.get(link) as r:
             text = await r.text()
@@ -254,7 +250,7 @@ async def cmd_restore(ctx, link=None):
     except Exception as e:
         await ctx.reply(f"⚠️ 오류: {e}")
 
-# ========== 관리자 리포트 ==========
+# ========= 관리자 리포트 =========
 def is_admin(m): return getattr(m.guild_permissions, "manage_guild", False)
 
 @bot.command(name="PP보고서")
@@ -301,7 +297,7 @@ async def cmd_admin_report(ctx, 기간=None, *args):
     else:
         await ctx.reply("⚠️ 사용법: !PP보고서 주간 / !PP보고서 월간 N월")
 
-# ========== 시작 ==========
+# ========= 시작 =========
 if __name__ == "__main__":
     TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
     asyncio.run(bot.start(TOKEN))
