@@ -1,24 +1,17 @@
 # -*- coding: utf-8 -*-
-# 둘기봇 v5.3.2_final — Render 무료플랜 대응 완전판
+# 둘기봇 v5.4_final_Stable — Render Starter 대응 완전판
 # ✅ 주요 기능:
-# - 출근 시 자동 +4점 반영
+# - 출근 시 DM 자동 +4점 반영
 # - 이미지/링크 점수 자동 인식
-# - !보고서 : 주간 점수 + 잔디 시각화
+# - !보고서 : 주간 점수 + 잔디 시각화 (DM 발송)
 # - !PP보고서 주간 / 월간 N월 : 관리자 전용 CSV
 # - !PP복원 [링크] : Discord 백업파일 복구
 # - 자동 백업 (매일 오전 6시)
 # - Flask keep-alive (Render 호환)
 # - 주간/월간 우수사원 달성 시 DM 축하 알림
+# - Render Starter용 안전 백업 로그 강화
 
-import os
-import io
-import csv
-import json
-import random
-import asyncio
-import datetime
-import pytz
-import aiohttp
+import os, io, csv, json, random, asyncio, datetime, pytz, aiohttp
 from typing import Dict
 from flask import Flask
 from threading import Thread
@@ -81,22 +74,19 @@ def add_activity_logic(data, uid, date_str, channel_id, channel_points_map):
     ensure_user(data, uid)
     conf = channel_points_map.get(channel_id)
     if not conf:
-        return False, []
+        return False
     points, ch_max = conf["points"], conf["daily_max"]
-
     user = data["users"][uid]
     if date_str not in user["activity"]:
         user["activity"][date_str] = {"total": 0, "by_channel": {}}
     today_rec = user["activity"][date_str]
     ckey = str(channel_id)
     prev = today_rec["by_channel"].get(ckey, 0)
-
     if prev + points > ch_max:
-        return False, []
-
+        return False
     today_rec["by_channel"][ckey] = prev + points
     today_rec["total"] += points
-    return True, []
+    return True
 
 # ========= 시각화 =========
 def get_week_progress(data, uid, ref_date, daily_goal=10):
@@ -139,7 +129,7 @@ def home(): return "Bot is alive!"
 def run_flask(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
 def keep_alive(): Thread(target=run_flask, daemon=True).start()
 
-# ========= 이벤트 =========
+# ========= on_ready =========
 @bot.event
 async def on_ready():
     print(f"✅ 로그인 완료: {bot.user}")
@@ -153,15 +143,13 @@ async def check_in(ctx):
     today = logical_date_str_from_now()
     ensure_user(data_store, uid)
 
-    # 이미 출근한 경우
     if today in data_store["users"][uid]["attendance"]:
         try:
             await ctx.author.send("이미 출근 완료 🕐")
         except discord.Forbidden:
-            await ctx.reply("⚠️ DM을 보낼 수 없어요! Discord 설정에서 서버 멤버 DM 허용을 켜주세요.")
+            await ctx.reply("⚠️ DM을 보낼 수 없어요! 서버 멤버 DM 허용을 켜주세요.")
         return
 
-    # 정상 출근 처리
     data_store["users"][uid]["attendance"].append(today)
     add_activity_logic(data_store, uid, today, 1423359791287242782, CHANNEL_POINTS)
     save_data(data_store)
@@ -169,8 +157,7 @@ async def check_in(ctx):
     try:
         await ctx.author.send("✅ 출근 완료! (+4점) 오늘도 힘내요!")
     except discord.Forbidden:
-        await ctx.reply("⚠️ DM을 보낼 수 없어요! Discord 설정에서 서버 멤버 DM 허용을 켜주세요.")
-
+        await ctx.reply("⚠️ DM을 보낼 수 없어요! 서버 멤버 DM 허용을 켜주세요.")
 
 # ========= 메시지 감지 =========
 @bot.event
@@ -183,69 +170,52 @@ async def on_message(msg):
     conf = CHANNEL_POINTS.get(cid)
     if not conf:
         await bot.process_commands(msg); return
+
     countable = True
     if cid == 1423171509752434790:
-        has_link = "http" in msg.content
-        has_attach = len(msg.attachments) > 0
-        countable = has_link or has_attach
+        countable = ("http" in msg.content) or (len(msg.attachments) > 0)
     elif conf["image_only"]:
         countable = any(a.content_type and a.content_type.startswith("image/") for a in msg.attachments)
     if not countable:
         await bot.process_commands(msg); return
+
     add_activity_logic(data_store, uid, today, cid, CHANNEL_POINTS)
     save_data(data_store)
     await check_milestones(msg.author, uid)
     await bot.process_commands(msg)
 
-# ========= 축하 알림 (주간 / 월간 달성 시 DM 발송) =========
-async def check_milestones(user, uid: str):
+# ========= 축하 알림 =========
+async def check_milestones(user, uid):
     today = datetime.datetime.now(KST).date()
     ensure_user(data_store, uid)
-
-    # --- 주간 점수 ---
     start, end = get_week_range(today)
-    weekly_total = sum(
-        rec.get("total", 0)
+    weekly_total = sum(rec.get("total", 0)
         for ds, rec in data_store["users"][uid]["activity"].items()
-        if start <= datetime.datetime.strptime(ds, "%Y-%m-%d").date() <= end
-    )
-
-    # --- 월간 점수 ---
+        if start <= datetime.datetime.strptime(ds, "%Y-%m-%d").date() <= end)
     prefix = f"{today.year}-{today.month:02d}"
-    monthly_total = sum(
-        rec.get("total", 0)
+    monthly_total = sum(rec.get("total", 0)
         for ds, rec in data_store["users"][uid]["activity"].items()
-        if ds.startswith(prefix)
-    )
-
+        if ds.startswith(prefix))
     notified = data_store["users"][uid].setdefault("notified", {})
-    wkey = week_key(today)
-    mkey = f"{today.year}-{today.month:02d}"
+    wkey, mkey = week_key(today), f"{today.year}-{today.month:02d}"
 
-    # ✅ 주간 우수사원 (60점 이상)
     if weekly_total >= WEEKLY_BEST_THRESHOLD and not notified.get(f"weekly_{wkey}"):
-        try:
-            msg = random.choice([
-                f"🌿 이번 주 {weekly_total}점 돌파! 당신의 꾸준한 열정이 정말 멋져요. 다음 주도 함께 성장해봐요 💪",
-                f"🌸 한 주 동안 꾸준히 쌓아온 {weekly_total}점, 정말 대단해요! 다음 주도 파이팅이에요 ☀️",
-                f"☕ 이번 주 목표 달성! 작은 노력들이 이렇게 멋진 결과를 만들었어요. 다음 주도 함께 달려봐요 🌈"
-            ])
-            await user.send(msg)
-            notified[f"weekly_{wkey}"] = True
+        msg = random.choice([
+            f"🌸 이번 주 {weekly_total}점 달성! 꾸준한 열정이 멋져요. 다음 주도 함께 성장해봐요 💪",
+            f"☕ 한 주 동안 쌓은 {weekly_total}점, 정말 대단해요! 다음 주도 화이팅 ☀️",
+        ])
+        try: await user.send(msg)
         except: pass
+        notified[f"weekly_{wkey}"] = True
 
-    # ✅ 월간 우수사원 (200점 이상)
     if monthly_total >= MONTHLY_BEST_THRESHOLD and not notified.get(f"monthly_{mkey}"):
-        try:
-            msg = random.choice([
-                f"🏆 {today.month}월 {monthly_total}점 달성! 한 달간의 꾸준한 노력, 정말 자랑스러워요. 다음 달에도 함께 멋지게 나아가요 ✨",
-                f"🌟 한 달 동안 쌓아온 {monthly_total}점, 그 열정과 성실함이 정말 대단해요. 다음 달에도 멋진 기록을 함께 만들어봐요 💪",
-                f"💫 {today.month}월 목표 달성! 노력의 결실이 반짝이고 있어요. 다음 달에도 천천히, 꾸준히 함께 가요 🌿"
-            ])
-            await user.send(msg)
-            notified[f"monthly_{mkey}"] = True
+        msg = random.choice([
+            f"🏆 {today.month}월 {monthly_total}점 달성! 한 달간의 꾸준한 노력, 정말 자랑스러워요. 다음 달에도 함께 나아가요 ✨",
+            f"💫 {today.month}월 {monthly_total}점 달성! 노력의 결실이 반짝이고 있어요. 다음 달에도 꾸준히 가요 🌿",
+        ])
+        try: await user.send(msg)
         except: pass
-
+        notified[f"monthly_{mkey}"] = True
     save_data(data_store)
 
 # ========= 보고서 =========
@@ -263,13 +233,15 @@ async def report(ctx):
            f"{get_month_grid_5x4(data_store, uid, today)}")
     await ctx.author.send(msg)
 
-# ========= 백업/복원 =========
+# ========= 백업 =========
 def backup_now():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = f.read()
         with open(BACKUP_FILE, "w", encoding="utf-8") as f:
             f.write(data)
+        size = os.path.getsize(DATA_FILE)
+        print(f"✅ Backup complete ({size} bytes) at {datetime.datetime.now(KST)}")
         return True
     return False
 
@@ -281,7 +253,6 @@ async def schedule_daily_backup_loop():
             next_backup += datetime.timedelta(days=1)
         await asyncio.sleep((next_backup - now).total_seconds())
         backup_now()
-        print("✅ Daily backup at 06:00 KST")
 
 def is_admin(m): return getattr(m.guild_permissions, "manage_guild", False)
 
@@ -292,14 +263,14 @@ async def cmd_backup(ctx):
     ok = backup_now()
     await ctx.reply("✅ 백업 완료!" if ok else "⚠️ 백업 실패")
 
-# ========= 외부 복원 =========
+# ========= 복원 =========
 @bot.command(name="PP복원")
-async def cmd_restore_from_link(ctx, file_url: str = None):
+async def cmd_restore(ctx, file_url: str = None):
     if not is_admin(ctx.author):
         return await ctx.reply("관리자만 가능해요.")
     if not file_url:
         return await ctx.reply("사용법: `!PP복원 [백업파일 링크]`")
-    if not (file_url.startswith("https://cdn.discordapp.com/") or file_url.startswith("https://media.discordapp.net/")):
+    if not file_url.startswith("https://cdn.discordapp.com/"):
         return await ctx.reply("⚠️ Discord 업로드 링크만 허용돼요!")
     try:
         async with aiohttp.ClientSession() as s:
@@ -370,4 +341,3 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
-
