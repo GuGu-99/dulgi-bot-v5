@@ -248,7 +248,7 @@ async def report(ctx):
 # ========= 백업/복원 =========
 
 # 자동 백업용 경로
-BACKUP_CHANNEL_ID = 1423359791287242782  # ⚠️ 실제 백업 채널 ID로 교체하세요
+BACKUP_CHANNEL_ID = 1427608696547967026  # ⚠️ 실제 백업 채널 ID로 교체하세요
 
 def backup_now():
     """현재 data.json을 data_backup.json으로 복사"""
@@ -388,6 +388,7 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
 
 
 
