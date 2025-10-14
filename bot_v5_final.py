@@ -57,10 +57,27 @@ def save_data(data, path=DATA_FILE):
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 def ensure_user(data, uid):
+    """유저 데이터 기본 구조 보장 (향후 레벨/칭호 확장 대비 버전)"""
     if "users" not in data:
         data["users"] = {}
+
     if uid not in data["users"]:
-        data["users"][uid] = {"attendance": [], "activity": {}, "notified": {}}
+        data["users"][uid] = {}
+
+    user = data["users"][uid]
+
+    # 기존 필드
+    user.setdefault("attendance", [])
+    user.setdefault("activity", {})
+    user.setdefault("notified", {})
+
+    # 👇 향후 확장 대비 필드 (지금은 사용 안 함)
+    user.setdefault("level", 1)        # 기본 레벨
+    user.setdefault("exp", 0)          # 누적 경험치
+    user.setdefault("rank_title", None)  # 칭호 (예: "신입 작가")
+    user.setdefault("badges", [])      # 특별 업적, 뱃지 저장용
+
+    data["users"][uid] = user
 
 def logical_date_str_from_now():
     now = datetime.datetime.now(KST)
@@ -100,7 +117,7 @@ def add_activity_logic(data, uid, date_str, channel_id, channel_points_map):
 # ========= 시각화 =========
 def get_week_progress(data, uid, ref_date, daily_goal=10):
     start, _ = get_week_range(ref_date)
-    labels = ["월", "화", "수", "목", "금", "토", "일"]
+    labels = ["월ㅣ", "화ㅣ", "수ㅣ", "목ㅣ", "금ㅣ", "토ㅣ", "일"]
     blocks = []
     cur = start
     for _ in range(7):
@@ -393,6 +410,7 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
 
 
 
