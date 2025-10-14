@@ -152,12 +152,25 @@ async def check_in(ctx):
     uid = str(ctx.author.id)
     today = logical_date_str_from_now()
     ensure_user(data_store, uid)
+
+    # 이미 출근한 경우
     if today in data_store["users"][uid]["attendance"]:
-        return await ctx.reply("이미 출근 완료 🕐")
+        try:
+            await ctx.author.send("이미 출근 완료 🕐")
+        except discord.Forbidden:
+            await ctx.reply("⚠️ DM을 보낼 수 없어요! Discord 설정에서 서버 멤버 DM 허용을 켜주세요.")
+        return
+
+    # 정상 출근 처리
     data_store["users"][uid]["attendance"].append(today)
     add_activity_logic(data_store, uid, today, 1423359791287242782, CHANNEL_POINTS)
     save_data(data_store)
-    await ctx.reply("✅ 출근 완료! (+4점) 오늘도 힘내요!")
+
+    try:
+        await ctx.author.send("✅ 출근 완료! (+4점) 오늘도 힘내요!")
+    except discord.Forbidden:
+        await ctx.reply("⚠️ DM을 보낼 수 없어요! Discord 설정에서 서버 멤버 DM 허용을 켜주세요.")
+
 
 # ========= 메시지 감지 =========
 @bot.event
@@ -357,3 +370,4 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
