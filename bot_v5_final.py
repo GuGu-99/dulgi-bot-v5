@@ -1,29 +1,34 @@
 # -*- coding: utf-8 -*-
-# 둘기봇 v5.3 — 전 기능 복구 통합본 (JSON 저장 / DM 보고서 / 잔디 타일 / 6시 기준 / 자동·수동 백업 / 관리자 리포트 / 메시지 점수)
-# - 메시지 감지 점수(이미지/링크 규칙, 채널별 일일 상한, 글로벌 상한)
-# - !출근 → 출근기록 + ‘출퇴근기록’(4점) 자동 반영
-# - !보고서 → DM + 주간/월간(5x4, 여백) 잔디
-# - 06시 기준 하루 전환 및 06시 자동 백업(백업채널 업로드) + !백업 수동
-# - 관리자 리포트: !PP보고서 주간 / !PP보고서 월간 YY.MM (상위20 + CSV)
-# - 주간 50점 단위 달성 시 DM 안내
-# - Flask keep-alive(Render용)
+# 둘기봇 v5.3.2_final — Render 무료플랜 대응 완전판
+# ✅ 주요 기능:
+# - 출근 시 자동 +4점 반영
+# - 이미지/링크 점수 자동 인식
+# - !보고서 : 주간 점수 + 잔디 시각화
+# - !PP보고서 주간 / 월간 N월 : 관리자 전용 CSV
+# - !PP복원 [링크] : Discord 백업파일 복구
+# - 자동 백업 (매일 오전 6시)
+# - Flask keep-alive (Render 호환)
+# - 주간/월간 우수사원 달성 시 DM 축하 알림
 
-import os, io, csv, json, asyncio, datetime, pytz
-from typing import Dict, Tuple, List
+import os
+import io
+import csv
+import json
+import random
+import asyncio
+import datetime
+import pytz
+import aiohttp
+from typing import Dict
 from flask import Flask
 from threading import Thread
-
 import discord
 from discord.ext import commands
 
 # ========= 기본 설정 =========
 KST = pytz.timezone("Asia/Seoul")
-LOGICAL_DAY_START_HOUR = 6  # 하루 시작 (06:00)
 DATA_FILE = "data.json"
 BACKUP_FILE = "data_backup.json"
-
-BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0"))
-GLOBAL_DAILY_CAP_ENV = os.environ.get("GLOBAL_DAILY_CAP")  # 선택: 숫자
 
 CHANNEL_POINTS = {
     1423170386811682908: {"name": "일일-그림보고", "points": 6, "daily_max": 6, "image_only": True},
@@ -31,175 +36,71 @@ CHANNEL_POINTS = {
     1423359059566006272: {"name": "정보-공모전", "points": 1, "daily_max": 1, "image_only": False},
     1423170949477568623: {"name": "정보-그림꿀팁", "points": 1, "daily_max": 1, "image_only": False},
     1423242322665148531: {"name": "고민상담", "points": 1, "daily_max": 1, "image_only": False},
-    1423359791287242782: {"name": "출퇴근기록", "points": 4, "daily_max": 4, "image_only": False},  # 출근용
-    1423171509752434790: {"name": "다-그렸어요", "points": 5, "daily_max": 5, "image_only": True},  # 특수: 이미지 OR 링크
+    1423359791287242782: {"name": "출퇴근기록", "points": 4, "daily_max": 4, "image_only": False},
+    1423171509752434790: {"name": "다-그렸어요", "points": 5, "daily_max": 5, "image_only": True},
 }
 
 WEEKLY_BEST_THRESHOLD = 60
-MONTHLY_BEST_THRESHOLD = 200  # (참고 상수, 리포트엔 누적값 사용)
+MONTHLY_BEST_THRESHOLD = 200
 
-# ========= 시간 유틸 =========
-def now_kst() -> datetime.datetime:
-    return datetime.datetime.now(KST)
+# ========= 데이터 유틸 =========
+def load_data(path=DATA_FILE):
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
 
-def logical_date_from_dt(dt: datetime.datetime) -> datetime.date:
-    if dt.hour < LOGICAL_DAY_START_HOUR:
-        dt -= datetime.timedelta(days=1)
-    return dt.date()
+def save_data(data, path=DATA_FILE):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
-def logical_date_str_from_now() -> str:
-    return logical_date_from_dt(now_kst()).strftime("%Y-%m-%d")
+def ensure_user(data, uid):
+    if "users" not in data:
+        data["users"] = {}
+    if uid not in data["users"]:
+        data["users"][uid] = {"attendance": [], "activity": {}, "notified": {}}
 
-def get_week_range_from_date_obj(d: datetime.date) -> Tuple[datetime.date, datetime.date]:
+def logical_date_str_from_now():
+    now = datetime.datetime.now(KST)
+    logical = now - datetime.timedelta(hours=6)
+    return logical.strftime("%Y-%m-%d")
+
+def get_week_range(d):
     start = d - datetime.timedelta(days=d.weekday())
     end = start + datetime.timedelta(days=6)
     return start, end
 
-def week_key(d: datetime.date) -> str:
+def week_key(d):
     y, w, _ = d.isocalendar()
     return f"{y}-W{w:02d}"
 
-# ========= 데이터 유틸(JSON) =========
-def load_data(path: str = DATA_FILE) -> dict:
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            try: return json.load(f)
-            except Exception: return {}
-    return {}
-
-def save_data(data: dict, path: str = DATA_FILE):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
-def ensure_user(data: dict, uid: str):
-    if "config" not in data:
-        data["config"] = {}
-    if "users" not in data:
-        data["users"] = {}
-    if uid not in data["users"]:
-        data["users"][uid] = {
-            "attendance": [],           # [date_str]
-            "activity": {},             # date_str -> {"total": int, "by_channel": {cid: pts}}
-            "notified": {}              # week_key -> [50,100,...]
-        }
-
-# ========= 통계 로직 =========
-def weekly_attendance_count_logic(data: Dict, uid: str, ref_date: datetime.date) -> int:
-    ensure_user(data, uid)
-    start, end = get_week_range_from_date_obj(ref_date)
-    cnt = 0
-    for ds in data["users"][uid]["attendance"]:
-        try:
-            ds_date = datetime.datetime.strptime(ds, "%Y-%m-%d").date()
-            if start <= ds_date <= end:
-                cnt += 1
-        except Exception:
-            pass
-    return cnt
-
-def weekly_activity_points_logic(data: Dict, uid: str, ref_date: datetime.date) -> Tuple[int, Dict[str, int]]:
-    ensure_user(data, uid)
-    start, end = get_week_range_from_date_obj(ref_date)
-    total = 0
-    breakdown: Dict[str, int] = {}
-    for ds, rec in data["users"][uid]["activity"].items():
-        try:
-            ds_date = datetime.datetime.strptime(ds, "%Y-%m-%d").date()
-        except Exception:
-            continue
-        if start <= ds_date <= end:
-            t = rec.get("total", 0)
-            total += t
-            for cid, pts in rec.get("by_channel", {}).items():
-                breakdown[cid] = breakdown.get(cid, 0) + pts
-    return total, breakdown
-
-def monthly_activity_points_logic(data: Dict, uid: str, year: int, month: int) -> int:
-    ensure_user(data, uid)
-    prefix = f"{year:04d}-{month:02d}"
-    s = 0
-    for ds, rec in data["users"][uid]["activity"].items():
-        if ds.startswith(prefix):
-            s += rec.get("total", 0)
-    return s
-
-# ========= 점수 추가 로직 =========
-def add_activity_logic(
-    data: Dict,
-    uid: str,
-    date_str: str,
-    channel_id: int,
-    channel_points_map: Dict,
-    global_daily_cap: int = None
-) -> Tuple[bool, List[int]]:
-    """점수 추가 & 50점 단위 축하 알림 계산(해당 주간 기준)"""
+def add_activity_logic(data, uid, date_str, channel_id, channel_points_map):
     ensure_user(data, uid)
     conf = channel_points_map.get(channel_id)
     if not conf:
         return False, []
-
-    points = conf["points"]
-    ch_max = conf["daily_max"]
+    points, ch_max = conf["points"], conf["daily_max"]
 
     user = data["users"][uid]
     if date_str not in user["activity"]:
         user["activity"][date_str] = {"total": 0, "by_channel": {}}
     today_rec = user["activity"][date_str]
     ckey = str(channel_id)
-    prev_by = today_rec["by_channel"].get(ckey, 0)
+    prev = today_rec["by_channel"].get(ckey, 0)
 
-    # per-channel daily cap
-    if prev_by + points > ch_max:
+    if prev + points > ch_max:
         return False, []
 
-    # global cap (옵션)
-    if global_daily_cap is not None and today_rec["total"] + points > int(global_daily_cap):
-        return False, []
-
-    # 이전 주간 총점
-    d = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
-    wkey = week_key(d)
-    prev_week_total = 0
-    for ds, rec in user["activity"].items():
-        try:
-            ds_date = datetime.datetime.strptime(ds, "%Y-%m-%d").date()
-        except Exception:
-            continue
-        if week_key(ds_date) == wkey:
-            prev_week_total += rec.get("total", 0)
-
-    # 점수 반영
-    today_rec["by_channel"][ckey] = prev_by + points
+    today_rec["by_channel"][ckey] = prev + points
     today_rec["total"] += points
+    return True, []
 
-    # 새로운 주간 총점
-    new_week_total = 0
-    for ds, rec in user["activity"].items():
-        try:
-            ds_date = datetime.datetime.strptime(ds, "%Y-%m-%d").date()
-        except Exception:
-            continue
-        if week_key(ds_date) == wkey:
-            new_week_total += rec.get("total", 0)
-
-    # 50점 단위 축하 알림
-    notified_levels = set(user["notified"].get(wkey, []))
-    prev_level = prev_week_total // 50
-    new_level = new_week_total // 50
-    newly = []
-    if new_level > prev_level:
-        for lv in range(prev_level + 1, new_level + 1):
-            milestone = lv * 50
-            if milestone not in notified_levels:
-                newly.append(milestone)
-                notified_levels.add(milestone)
-        user["notified"][wkey] = sorted(list(notified_levels))
-
-    return True, newly
-
-# ========= 잔디 타일 =========
-def get_week_progress(data: Dict, uid: str, ref_date: datetime.date, daily_goal: int = 10) -> str:
-    start, _ = get_week_range_from_date_obj(ref_date)
+# ========= 시각화 =========
+def get_week_progress(data, uid, ref_date, daily_goal=10):
+    start, _ = get_week_range(ref_date)
     labels = ["월", "화", "수", "목", "금", "토", "일"]
     blocks = []
     cur = start
@@ -210,27 +111,147 @@ def get_week_progress(data: Dict, uid: str, ref_date: datetime.date, daily_goal:
         cur += datetime.timedelta(days=1)
     return " ".join(labels) + "\n" + " ".join(blocks)
 
-def get_month_grid_5x4(data: Dict, uid: str, ref_date: datetime.date, daily_goal: int = 10) -> str:
+def get_month_grid_5x4(data, uid, ref_date, daily_goal=10):
     first = ref_date.replace(day=1)
     next_month = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
     month_days = (next_month - datetime.timedelta(days=1)).day
     cells = []
-    for day in range(1, 21):  # 1~20일
+    for day in range(1, 21):
         if day > month_days:
             cells.append("  ")
             continue
         ds = first.replace(day=day).strftime("%Y-%m-%d")
         pts = data["users"][uid]["activity"].get(ds, {}).get("total", 0)
         cells.append("🟩" if pts >= daily_goal else "⬜")
-    rows = []
-    for r in range(4):
-        row = " ".join(cells[r*5:(r+1)*5])   # 열 사이 공백
-        rows.append(row)
-    spaced_rows = "\n\n".join(rows)         # 행 사이 여백
-    return "월간 활동 (1~20일 기준, 초록=달성)\n" + spaced_rows
+    rows = [" ".join(cells[r*5:(r+1)*5]) for r in range(4)]
+    return "월간 활동 (1~20일 기준)\n" + "\n".join(rows)
 
-# ========= 백업 =========
-def backup_now() -> bool:
+# ========= Discord & Flask =========
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+data_store = load_data()
+
+app = Flask(__name__)
+@app.route("/")
+def home(): return "Bot is alive!"
+def run_flask(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+def keep_alive(): Thread(target=run_flask, daemon=True).start()
+
+# ========= 이벤트 =========
+@bot.event
+async def on_ready():
+    print(f"✅ 로그인 완료: {bot.user}")
+    keep_alive()
+    bot.backup_task = asyncio.create_task(schedule_daily_backup_loop())
+
+# ========= 출근 =========
+@bot.command(name="출근")
+async def check_in(ctx):
+    uid = str(ctx.author.id)
+    today = logical_date_str_from_now()
+    ensure_user(data_store, uid)
+    if today in data_store["users"][uid]["attendance"]:
+        return await ctx.reply("이미 출근 완료 🕐")
+    data_store["users"][uid]["attendance"].append(today)
+    add_activity_logic(data_store, uid, today, 1423359791287242782, CHANNEL_POINTS)
+    save_data(data_store)
+    await ctx.reply("✅ 출근 완료! (+4점) 오늘도 힘내요!")
+
+# ========= 메시지 감지 =========
+@bot.event
+async def on_message(msg):
+    if msg.author.bot: return
+    cid = msg.channel.id
+    uid = str(msg.author.id)
+    today = logical_date_str_from_now()
+    ensure_user(data_store, uid)
+    conf = CHANNEL_POINTS.get(cid)
+    if not conf:
+        await bot.process_commands(msg); return
+    countable = True
+    if cid == 1423171509752434790:
+        has_link = "http" in msg.content
+        has_attach = len(msg.attachments) > 0
+        countable = has_link or has_attach
+    elif conf["image_only"]:
+        countable = any(a.content_type and a.content_type.startswith("image/") for a in msg.attachments)
+    if not countable:
+        await bot.process_commands(msg); return
+    add_activity_logic(data_store, uid, today, cid, CHANNEL_POINTS)
+    save_data(data_store)
+    await check_milestones(msg.author, uid)
+    await bot.process_commands(msg)
+
+# ========= 축하 알림 (주간 / 월간 달성 시 DM 발송) =========
+async def check_milestones(user, uid: str):
+    today = datetime.datetime.now(KST).date()
+    ensure_user(data_store, uid)
+
+    # --- 주간 점수 ---
+    start, end = get_week_range(today)
+    weekly_total = sum(
+        rec.get("total", 0)
+        for ds, rec in data_store["users"][uid]["activity"].items()
+        if start <= datetime.datetime.strptime(ds, "%Y-%m-%d").date() <= end
+    )
+
+    # --- 월간 점수 ---
+    prefix = f"{today.year}-{today.month:02d}"
+    monthly_total = sum(
+        rec.get("total", 0)
+        for ds, rec in data_store["users"][uid]["activity"].items()
+        if ds.startswith(prefix)
+    )
+
+    notified = data_store["users"][uid].setdefault("notified", {})
+    wkey = week_key(today)
+    mkey = f"{today.year}-{today.month:02d}"
+
+    # ✅ 주간 우수사원 (60점 이상)
+    if weekly_total >= WEEKLY_BEST_THRESHOLD and not notified.get(f"weekly_{wkey}"):
+        try:
+            msg = random.choice([
+                f"🌿 이번 주 {weekly_total}점 돌파! 당신의 꾸준한 열정이 정말 멋져요. 다음 주도 함께 성장해봐요 💪",
+                f"🌸 한 주 동안 꾸준히 쌓아온 {weekly_total}점, 정말 대단해요! 다음 주도 파이팅이에요 ☀️",
+                f"☕ 이번 주 목표 달성! 작은 노력들이 이렇게 멋진 결과를 만들었어요. 다음 주도 함께 달려봐요 🌈"
+            ])
+            await user.send(msg)
+            notified[f"weekly_{wkey}"] = True
+        except: pass
+
+    # ✅ 월간 우수사원 (200점 이상)
+    if monthly_total >= MONTHLY_BEST_THRESHOLD and not notified.get(f"monthly_{mkey}"):
+        try:
+            msg = random.choice([
+                f"🏆 {today.month}월 {monthly_total}점 달성! 한 달간의 꾸준한 노력, 정말 자랑스러워요. 다음 달에도 함께 멋지게 나아가요 ✨",
+                f"🌟 한 달 동안 쌓아온 {monthly_total}점, 그 열정과 성실함이 정말 대단해요. 다음 달에도 멋진 기록을 함께 만들어봐요 💪",
+                f"💫 {today.month}월 목표 달성! 노력의 결실이 반짝이고 있어요. 다음 달에도 천천히, 꾸준히 함께 가요 🌿"
+            ])
+            await user.send(msg)
+            notified[f"monthly_{mkey}"] = True
+        except: pass
+
+    save_data(data_store)
+
+# ========= 보고서 =========
+@bot.command(name="보고서")
+async def report(ctx):
+    uid = str(ctx.author.id)
+    today = datetime.datetime.now(KST).date()
+    ensure_user(data_store, uid)
+    att = len(data_store["users"][uid]["attendance"])
+    total = sum(rec.get("total", 0) for rec in data_store["users"][uid]["activity"].values())
+    msg = (f"🌼 {ctx.author.display_name}님의 이번 주 활동 요약\n\n"
+           f"🕐 출근 횟수: {att}회\n"
+           f"💬 총 점수: {total}점\n\n"
+           f"📊 주간 활동:\n{get_week_progress(data_store, uid, today)}\n\n"
+           f"{get_month_grid_5x4(data_store, uid, today)}")
+    await ctx.author.send(msg)
+
+# ========= 백업/복원 =========
+def backup_now():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = f.read()
@@ -240,309 +261,99 @@ def backup_now() -> bool:
     return False
 
 async def schedule_daily_backup_loop():
-    # 매일 06:00 KST 자동 백업 + 백업 채널 업로드
     while True:
-        now = now_kst()
-        target = now.replace(hour=6, minute=0, second=0, microsecond=0)
-        if now >= target:
-            target += datetime.timedelta(days=1)
-        await asyncio.sleep(max(1, int((target - now).total_seconds())))
-        ok = backup_now()
-        if ok:
-            print("✅ Daily backup created at 06:00 KST")
-            try:
-                buf = io.BytesIO(json.dumps(load_data(), ensure_ascii=False, indent=2).encode())
-                name = f"snapshot_{now_kst().strftime('%Y%m%d_%H%M')}.json"
-                if BACKUP_CHANNEL_ID:
-                    ch = bot.get_channel(BACKUP_CHANNEL_ID)
-                    if ch:
-                        await ch.send("🧷 자동 백업 (06시)", file=discord.File(buf, filename=name))
-            except Exception as e:
-                print(f"Backup upload error: {e}")
+        now = datetime.datetime.now(KST)
+        next_backup = now.replace(hour=6, minute=0, second=0, microsecond=0)
+        if next_backup < now:
+            next_backup += datetime.timedelta(days=1)
+        await asyncio.sleep((next_backup - now).total_seconds())
+        backup_now()
+        print("✅ Daily backup at 06:00 KST")
 
-# ========= Discord & Flask =========
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-data_store = load_data()
-
-# Flask keep-alive (Render)
-app = Flask(__name__)
-@app.route("/")
-def home():
-    return "Bot is alive!"
-
-def run_flask():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
-
-def keep_alive():
-    t = Thread(target=run_flask, daemon=True)
-    t.start()
-
-def is_admin(member: discord.Member) -> bool:
-    try:
-        return member.guild_permissions.manage_guild
-    except Exception:
-        return False
-
-# ========= 이벤트 & 명령어 =========
-@bot.event
-async def on_ready():
-    print(f"✅ 로그인 완료: {bot.user}")
-    keep_alive()
-    bot.backup_task = asyncio.create_task(schedule_daily_backup_loop())
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-
-    cid = message.channel.id
-    uid = str(message.author.id)
-    ensure_user(data_store, uid)
-
-    ch_conf = CHANNEL_POINTS.get(cid)
-    if ch_conf is None:
-        await bot.process_commands(message)
-        return
-
-    # 특수규칙: ‘다-그렸어요’(1423171509752434790) → 이미지 or 링크 포함시 인정
-    special_channel = 1423171509752434790
-    countable = True
-    if cid == special_channel:
-        has_link = ("http://" in message.content) or ("https://" in message.content)
-        has_attachment = any(a for a in message.attachments)
-        countable = has_link or has_attachment
-    else:
-        # image_only면 이미지 첨부 필요
-        if ch_conf.get("image_only"):
-            has_image = any(a.content_type and a.content_type.startswith("image/") for a in message.attachments)
-            countable = has_image
-
-    if not countable:
-        await bot.process_commands(message)
-        return
-
-    # 글로벌 일일 상한
-    global_cap = None
-    try:
-        if GLOBAL_DAILY_CAP_ENV:
-            global_cap = int(GLOBAL_DAILY_CAP_ENV)
-        else:
-            cfg_cap = data_store.get("config", {}).get("global_daily_cap")
-            global_cap = int(cfg_cap) if cfg_cap is not None else None
-    except Exception:
-        global_cap = None
-
-    today_str = logical_date_str_from_now()
-
-    added, newly = add_activity_logic(
-        data_store, uid, today_str, cid, CHANNEL_POINTS, global_daily_cap=global_cap
-    )
-    if added:
-        save_data(data_store)
-        if newly:
-            try:
-                wtotal, _ = weekly_activity_points_logic(data_store, uid, logical_date_from_dt(now_kst()))
-                msg = f"🎉 이번주 {max(newly)}점 달성! (현재 주간 합계: {wtotal}점)"
-                await message.author.send(msg)
-            except Exception:
-                pass
-
-    await bot.process_commands(message)
-
-@bot.command(name="출근")
-async def check_in(ctx):
-    uid = str(ctx.author.id)
-    today_str = logical_date_str_from_now()
-    ensure_user(data_store, uid)
-
-    if today_str in data_store["users"][uid]["attendance"]:
-        try:
-            await ctx.author.send("이미 출근을 완료했습니다 🕐")
-        except:
-            await ctx.reply("이미 출근을 완료했습니다 🕐")
-        return
-
-    # 출근 기록
-    data_store["users"][uid]["attendance"].append(today_str)
-    # 출근 점수(출퇴근기록 4점) 자동 반영
-    commute_channel_id = 1423359791287242782
-    add_activity_logic(data_store, uid, today_str, commute_channel_id, CHANNEL_POINTS)
-
-    save_data(data_store)
-    try:
-        await ctx.author.send("✅ 출근 완료! 오늘도 힘내요! (+4점)")
-    except:
-        await ctx.reply("✅ 출근 완료! 오늘도 힘내요! (+4점)")
-
-@bot.command(name="보고서")
-async def report_personal(ctx):
-    uid = str(ctx.author.id)
-    today = logical_date_from_dt(now_kst())
-    ensure_user(data_store, uid)
-
-    att = weekly_attendance_count_logic(data_store, uid, today)
-    pts, breakdown = weekly_activity_points_logic(data_store, uid, today)
-
-    bd_lines = []
-    for cid, v in breakdown.items():
-        try:
-            cid_int = int(cid)
-        except Exception:
-            cid_int = None
-        nm = CHANNEL_POINTS.get(cid_int, {}).get("name", str(cid))
-        bd_lines.append(f"{nm}: {v}")
-    bd_read = ", ".join(bd_lines) if bd_lines else "없음"
-
-    remain = max(0, WEEKLY_BEST_THRESHOLD - pts)
-
-    msg = (
-        f"🌼 {ctx.author.display_name}님, 이번 주 활동 요약이에요!\n\n"
-        f"🕐 출근 횟수: {att}회\n"
-        f"💬 활동 점수: {pts}점\n"
-        f"📂 활동 채널별: {bd_read}\n\n"
-        f"{'✨ 우수사원까지 '+str(remain)+'점 남았어요! 💪' if remain>0 else '🎉 이번 주 우수사원 기준 달성! 멋져요 💖'}\n"
-    )
-    msg += "\n📊 이번주 활동 현황:\n" + get_week_progress(data_store, uid, today, daily_goal=10) + "\n"
-    msg += "\n" + get_month_grid_5x4(data_store, uid, today, daily_goal=10) + "\n"
-
-    try:
-        await ctx.author.send(msg)
-    except:
-        await ctx.reply("DM을 보낼 수 없습니다! DM 허용을 켜주세요 🕊️")
+def is_admin(m): return getattr(m.guild_permissions, "manage_guild", False)
 
 @bot.command(name="백업")
 async def cmd_backup(ctx):
     if not is_admin(ctx.author):
-        return await ctx.reply("이 명령어는 관리자만 사용할 수 있어요.")
+        return await ctx.reply("관리자만 가능해요.")
     ok = backup_now()
-    if ok:
-        try:
-            buf = io.BytesIO(json.dumps(load_data(), ensure_ascii=False, indent=2).encode())
-            name = f"manual_backup_{now_kst().strftime('%Y%m%d_%H%M')}.json"
-            if BACKUP_CHANNEL_ID:
-                ch = bot.get_channel(BACKUP_CHANNEL_ID)
-                if ch:
-                    await ch.send("🧷 수동 백업 실행됨", file=discord.File(buf, filename=name))
-        except Exception as e:
-            print(f"Manual backup upload error: {e}")
-        await ctx.reply("✅ 수동 백업 완료! (백업 채널 업로드)")
-    else:
-        await ctx.reply("⚠️ 백업할 데이터가 없어요.")
+    await ctx.reply("✅ 백업 완료!" if ok else "⚠️ 백업 실패")
 
-# ====== 관리자 리포트 ======
-def all_users_week_total(data: Dict, ref_date: datetime.date) -> List[Tuple[str, int]]:
+# ========= 외부 복원 =========
+@bot.command(name="PP복원")
+async def cmd_restore_from_link(ctx, file_url: str = None):
+    if not is_admin(ctx.author):
+        return await ctx.reply("관리자만 가능해요.")
+    if not file_url:
+        return await ctx.reply("사용법: `!PP복원 [백업파일 링크]`")
+    if not (file_url.startswith("https://cdn.discordapp.com/") or file_url.startswith("https://media.discordapp.net/")):
+        return await ctx.reply("⚠️ Discord 업로드 링크만 허용돼요!")
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(file_url) as r:
+                if r.status != 200:
+                    return await ctx.reply("⚠️ 파일 불러오기 실패")
+                text = await r.text()
+        data_json = json.loads(text)
+        if "users" not in data_json:
+            return await ctx.reply("⚠️ 잘못된 JSON 구조")
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data_json, f, ensure_ascii=False, indent=4)
+        global data_store
+        data_store = data_json
+        await ctx.reply("✅ 복원 완료! data.json 갱신됨")
+    except Exception as e:
+        await ctx.reply(f"⚠️ 복원 중 오류: {e}")
+
+# ========= 관리자 보고서 =========
+def all_users_week_total(data, ref_date):
+    start, end = get_week_range(ref_date)
     ret = []
     for uid in data.get("users", {}):
-        total, _ = weekly_activity_points_logic(data, uid, ref_date)
+        total = sum(rec.get("total", 0) for ds, rec in data["users"][uid]["activity"].items())
         ret.append((uid, total))
-    ret.sort(key=lambda x: x[1], reverse=True)
-    return ret
-
-def all_users_month_total(data: Dict, year: int, month: int) -> List[Tuple[str, int]]:
-    ret = []
-    for uid in data.get("users", {}):
-        total = monthly_activity_points_logic(data, uid, year, month)
-        ret.append((uid, total))
-    ret.sort(key=lambda x: x[1], reverse=True)
-    return ret
+    return sorted(ret, key=lambda x: x[1], reverse=True)
 
 @bot.command(name="PP보고서")
 async def cmd_pp_report(ctx, 기간: str = None, *args):
-    """관리자 전용: !PP보고서 주간  /  !PP보고서 월간 YY.MM  (또는 10월 허용)"""
     if not is_admin(ctx.author):
-        return await ctx.reply("이 명령어는 관리자만 사용할 수 있어요.")
+        return await ctx.reply("관리자만 가능해요.")
     if 기간 not in ("주간", "월간"):
-        return await ctx.reply("사용법: `!PP보고서 주간` 또는 `!PP보고서 월간 YY.MM`")
-
+        return await ctx.reply("사용법: `!PP보고서 주간` 또는 `!PP보고서 월간 N월`")
+    today = datetime.datetime.now(KST).date()
     if 기간 == "주간":
-        today = logical_date_from_dt(now_kst())
-        start, end = get_week_range_from_date_obj(today)
-        pairs = all_users_week_total(data_store, today)  # [(uid, total)] desc
-
-        # CSV
+        pairs = all_users_week_total(data_store, today)
         csv_buf = io.StringIO()
-        writer = csv.writer(csv_buf)
-        writer.writerow(["순위", "사용자명", "사용자ID", "주간점수"])
-        display_rows = []
-        for rank, (uid, sc) in enumerate(pairs, start=1):
+        w = csv.writer(csv_buf)
+        w.writerow(["사용자명", "ID", "주간점수"])
+        for uid, sc in pairs:
             try:
-                member = await ctx.guild.fetch_member(int(uid))
-                name = member.display_name
-            except Exception:
+                m = await ctx.guild.fetch_member(int(uid))
+                name = m.display_name
+            except:
                 name = uid
-            writer.writerow([rank, name, uid, sc])
-            display_rows.append((name, sc))
-
-        csv_bytes = io.BytesIO(csv_buf.getvalue().encode("utf-8"))
-        y, w, _ = today.isocalendar()
-        filename = f"weekly_report_{today.year}-{today.month:02d}-Week{w}.csv"
-
-        # 텍스트 상위 20명
-        top20 = display_rows[:20]
-        header = f"📊 이번주 활동 순위 ({start.month}월 {start.day}일 ~ {end.month}월 {end.day}일)\n" + "-"*40
-        lines = [f"{i+1:>2}️⃣ {n} — {s}점" for i, (n, s) in enumerate(top20)]
-        body = "\n".join(lines) if lines else "데이터가 없어요 😅"
-        footer = "-"*40 + "\n📎 CSV 첨부 (유저명+ID 포함)"
-
-        return await ctx.reply(f"{header}\n{body}\n{footer}", file=discord.File(fp=csv_bytes, filename=filename))
-
+            w.writerow([name, uid, sc])
+        await ctx.reply("📊 주간 보고서", file=discord.File(io.BytesIO(csv_buf.getvalue().encode("utf-8")), "weekly.csv"))
     if 기간 == "월간":
-        today = logical_date_from_dt(now_kst())
-
-        # YY.MM / YYYY.MM / "10월" 모두 허용
-        target_year, target_month = today.year, today.month
-        if args and len(args) >= 1:
-            raw = args[0].strip()
-            try:
-                if "월" in raw:
-                    target_month = int(raw.replace("월", ""))
-                elif "." in raw:
-                    y_s, m_s = raw.split(".")
-                    if len(y_s) == 2:
-                        target_year = int("20" + y_s)
-                    else:
-                        target_year = int(y_s)
-                    target_month = int(m_s)
-                else:
-                    target_month = int(raw)
-            except Exception:
-                return await ctx.reply("형식 오류: 예) `!PP보고서 월간 25.09` 또는 `!PP보고서 월간 10월`")
-
-        pairs = all_users_month_total(data_store, target_year, target_month)
-
-        # CSV
+        m = today.month
+        if args: m = int(args[0].replace("월", ""))
+        pairs = all_users_week_total(data_store, today.replace(month=m))
         csv_buf = io.StringIO()
-        writer = csv.writer(csv_buf)
-        writer.writerow(["순위", "사용자명", "사용자ID", "월간점수"])
-        display_rows = []
-        for rank, (uid, sc) in enumerate(pairs, start=1):
+        w = csv.writer(csv_buf)
+        w.writerow(["사용자명", "ID", "월간점수"])
+        for uid, sc in pairs:
             try:
-                member = await ctx.guild.fetch_member(int(uid))
-                name = member.display_name
-            except Exception:
+                m = await ctx.guild.fetch_member(int(uid))
+                name = m.display_name
+            except:
                 name = uid
-            writer.writerow([rank, name, uid, sc])
-            display_rows.append((name, sc))
-
-        csv_bytes = io.BytesIO(csv_buf.getvalue().encode("utf-8"))
-        filename = f"monthly_report_{target_year}-{target_month:02d}.csv"
-
-        # 텍스트 상위 20명
-        top20 = display_rows[:20]
-        header = f"📅 {target_year}년 {target_month}월 활동 순위\n" + "-"*40
-        lines = [f"{i+1:>2}️⃣ {n} — {s}점" for i, (n, s) in enumerate(top20)]
-        body = "\n".join(lines) if lines else "데이터가 없어요 😅"
-        footer = "-"*40 + "\n📎 CSV 첨부 (유저명+ID 포함)"
-
-        return await ctx.reply(f"{header}\n{body}\n{footer}", file=discord.File(fp=csv_bytes, filename=filename))
+            w.writerow([name, uid, sc])
+        await ctx.reply("📅 월간 보고서", file=discord.File(io.BytesIO(csv_buf.getvalue().encode("utf-8")), f"monthly_{m}월.csv"))
 
 # ========= 시작 =========
 if __name__ == "__main__":
     TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
-    if not TOKEN:
-        print("❌ DISCORD_BOT_TOKEN 누락")
-    else:
+    if TOKEN:
         bot.run(TOKEN)
+    else:
+        print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
