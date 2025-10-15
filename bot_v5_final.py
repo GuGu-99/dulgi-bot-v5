@@ -185,7 +185,7 @@ async def check_in(ctx):
 
     # ✅ “서버로 돌아가기” 버튼 추가
     server_button = Button(
-        label="서버로 돌아가기 🏠",
+        label="회사로 돌아가기 🏠",
         url="https://discord.com/channels/1310854848442269767"
     )
     view = View()
@@ -438,6 +438,7 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
 
 
 
