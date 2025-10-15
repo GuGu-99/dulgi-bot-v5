@@ -16,6 +16,8 @@ from flask import Flask
 from threading import Thread
 import discord
 from discord.ext import commands
+from discord.ui import View, Button
+
 
 # ========= 기본 설정 =========
 KST = pytz.timezone("Asia/Seoul")
@@ -173,12 +175,24 @@ async def check_in(ctx):
     uid = str(ctx.author.id)
     today = logical_date_str_from_now()
     ensure_user(data_store, uid)
+
     if today in data_store["users"][uid]["attendance"]:
         return await ctx.author.send("이미 출근 완료 🕐")
+
     data_store["users"][uid]["attendance"].append(today)
     add_activity_logic(data_store, uid, today, 1423359791287242782, CHANNEL_POINTS)
     save_data(data_store)
-    await ctx.author.send("✅ 출근 완료! (+4점) 오늘도 힘내요!")
+
+    # ✅ “서버로 돌아가기” 버튼 추가
+    server_button = Button(
+        label="서버로 돌아가기 🏠",
+        url="https://discord.com/channels/1310854848442269767"
+    )
+    view = View()
+    view.add_item(server_button)
+
+    await ctx.author.send("✅ 출근 완료! (+4점) 오늘도 힘내요!", view=view)
+
 
 # ========= 메시지 감지 =========
 @bot.event
@@ -258,14 +272,28 @@ async def report(ctx):
     uid = str(ctx.author.id)
     today = datetime.datetime.now(KST).date()
     ensure_user(data_store, uid)
+
     att = len(data_store["users"][uid]["attendance"])
     total = sum(rec.get("total", 0) for rec in data_store["users"][uid]["activity"].values())
-    msg = (f"🌼 {ctx.author.display_name}님의 이번 주 활동 요약\n\n"
-           f"🕐 출근 횟수: {att}회\n"
-           f"💬 총 점수: {total}점\n\n"
-           f"📊 주간 활동:\n{get_week_progress(data_store, uid, today)}\n\n"
-           f"{get_month_grid_5x4(data_store, uid, today)}")
-    await ctx.author.send(msg)
+
+    msg = (
+        f"🌼 {ctx.author.display_name}님의 이번 주 활동 요약\n\n"
+        f"🕐 출근 횟수: {att}회\n"
+        f"💬 총 점수: {total}점\n\n"
+        f"📊 주간 활동:\n{get_week_progress(data_store, uid, today)}\n\n"
+        f"{get_month_grid_5x4(data_store, uid, today)}"
+    )
+
+    # ✅ “서버로 돌아가기” 버튼 추가
+    server_button = Button(
+        label="서버로 돌아가기 🏠",
+        url="https://discord.com/channels/1310854848442269767"
+    )
+    view = View()
+    view.add_item(server_button)
+
+    await ctx.author.send(msg, view=view)
+
 
 # ========= 백업/복원 =========
 
@@ -410,6 +438,7 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
 
 
 
