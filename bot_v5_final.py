@@ -46,7 +46,7 @@ if os.path.exists(OLD_DATA_FILE) and not os.path.exists(DATA_FILE):
 SERVER_URL = "https://discord.com/channels/1310854848442269767"
 
 # 백업 업로드 채널(필요시 교체)
-BACKUP_CHANNEL_ID = 1423359791287242782  # 🔧 실제 백업 채널 ID로 교체하세요
+BACKUP_CHANNEL_ID = 1427608696547967026  # 🔧 실제 백업 채널 ID로 교체하세요
 
 # 채널 점수 체계
 CHANNEL_POINTS = {
@@ -441,24 +441,36 @@ async def cmd_pp_report(ctx, 기간: str = None, *args):
 
     today = datetime.datetime.now(KST).date()
 
+    # --- 주간 보고서 ---
     if 기간 == "주간":
         pairs = all_users_week_total(data_store, today)
         csv_buf = io.StringIO()
         w = csv.writer(csv_buf)
-        w.writerow(["사용자명", "사용자ID", "주간점수"])
-        for uid, sc in pairs:
+        w.writerow(["닉네임", "ID", "주간점수"])
+        text_lines = ["📊 **이번 주 상위 20명**", "```"]
+
+        for i, (uid, sc) in enumerate(pairs[:20], start=1):
             try:
-                m = await ctx.guild.fetch_member(int(uid))
-                name = m.display_name
+                member = await ctx.guild.fetch_member(int(uid))
+                name = member.display_name
             except:
                 name = uid
             w.writerow([name, uid, sc])
+            text_lines.append(f"{i:>2}. {name:<20} | {sc:>4}점")
+
+        text_lines.append("```")
+
         csv_bytes = io.BytesIO(csv_buf.getvalue().encode("utf-8"))
         start, end = get_week_range(today)
         header = f"📊 이번주 활동 순위 ({start.month}월 {start.day}일 ~ {end.month}월 {end.day}일)"
-        await ctx.reply(header, file=discord.File(csv_bytes, f"weekly_report_{today.year}-W{today.isocalendar()[1]:02d}.csv"))
+        await ctx.reply(
+            header,
+            file=discord.File(csv_bytes, f"weekly_report_{today.year}-W{today.isocalendar()[1]:02d}.csv"),
+        )
+        await ctx.send("\n".join(text_lines))
         return
 
+    # --- 월간 보고서 ---
     if 기간 == "월간":
         target_year, target_month = today.year, today.month
         if args and len(args) >= 1:
@@ -470,17 +482,24 @@ async def cmd_pp_report(ctx, 기간: str = None, *args):
 
         csv_buf = io.StringIO()
         w = csv.writer(csv_buf)
-        w.writerow(["사용자명", "사용자ID", "월간점수"])
-        for uid, sc in pairs:
+        w.writerow(["닉네임", "ID", "월간점수"])
+        text_lines = [f"📅 **{target_month}월 상위 20명**", "```"]
+
+        for i, (uid, sc) in enumerate(pairs[:20], start=1):
             try:
-                m = await ctx.guild.fetch_member(int(uid))
-                name = m.display_name
+                member = await ctx.guild.fetch_member(int(uid))
+                name = member.display_name
             except:
                 name = uid
             w.writerow([name, uid, sc])
+            text_lines.append(f"{i:>2}. {name:<20} | {sc:>4}점")
+
+        text_lines.append("```")
+
         csv_bytes = io.BytesIO(csv_buf.getvalue().encode("utf-8"))
         header = f"📅 {target_year}년 {target_month}월 활동 순위"
         await ctx.reply(header, file=discord.File(csv_bytes, f"monthly_report_{target_year}-{target_month:02d}.csv"))
+        await ctx.send("\n".join(text_lines))
         return
 
 # ========= 시작 =========
@@ -490,3 +509,4 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     else:
         print("❌ DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
